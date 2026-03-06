@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "activationCodePolicy": "fixed_numeric",
+  "lastCode": {
+    "AMS": 1,
+    "CJL": 1,
+    "GHQ": 1,
+    "HUN": 1,
+    "EPQ": 1
+  },
+  "records": [
+    {
+      "id": 1,
+      "abbr": "AMS",
+      "name": "成就动机量表AMS",
+      "code": "AMS0001",
+      "activationCode": "2025",
+      "file": "成就动机量表AMS.html",
+      "createdAt": "2026-03-04"
+    },
+    {
+      "id": 2,
+      "abbr": "CJL",
+      "name": "创造力测量量表",
+      "code": "CJL0001",
+      "activationCode": "2026",
+      "file": "创造力测量量表.html",
+      "createdAt": "2026-03-04"
+    },
+    {
+      "id": 3,
+      "abbr": "GHQ",
+      "name": "一般健康问卷GHQ-12",
+      "code": "GHQ0001",
+      "activationCode": "2027",
+      "file": "一般健康问卷GHQ-12.html",
+      "createdAt": "2026-03-04"
+    },
+    {
+      "id": 4,
+      "abbr": "HUN",
+      "name": "OLSON婚姻质量问卷",
+      "code": "HUN0001",
+      "activationCode": "2028",
+      "file": "OLSON婚姻质量问卷.html",
+      "createdAt": "2026-03-04"
+    },
+    {
+      "id": 5,
+      "abbr": "EPQ",
+      "name": "艾森克人格问卷(成人)",
+      "code": "EPQ0001",
+      "activationCode": "2029",
+      "file": "艾森克人格问卷(成人).html",
+      "createdAt": "2026-03-04"
+    }
+  ]
+}
