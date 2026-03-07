@@ -973,11 +973,13 @@ ${optionsHtml}
         const optionsJson = JSON.stringify(quizOptions);
         const scoringJson = JSON.stringify(scoring);
         const resultsJson = JSON.stringify(results);
+        const safeActivationCode = String(activationCode).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const safeStorageKey = String(storageKey).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
         return `
         // 激活码配置
-        const ACTIVATION_CODE = '${activationCode}';
-        const STORAGE_KEY = '${storageKey}';
+        const ACTIVATION_CODE = '${safeActivationCode}';
+        const STORAGE_KEY = '${safeStorageKey}';
         const OPTIONS_CONFIG = ${optionsJson};
 
         // 页面加载时检查激活状态
@@ -992,7 +994,8 @@ ${optionsHtml}
 
         // 检查是否已激活
         function isActivated() {
-            return localStorage.getItem(STORAGE_KEY) === 'true';
+            // Store and compare the activation code itself to avoid "key collision" bypass.
+            return localStorage.getItem(STORAGE_KEY) === ACTIVATION_CODE;
         }
 
         // 验证激活码
@@ -1002,7 +1005,7 @@ ${optionsHtml}
             const code = input.value.trim();
 
             if (code === ACTIVATION_CODE) {
-                localStorage.setItem(STORAGE_KEY, 'true');
+                localStorage.setItem(STORAGE_KEY, ACTIVATION_CODE);
                 showPage('homePage');
                 error.textContent = '';
             } else {
