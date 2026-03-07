@@ -36,11 +36,12 @@ const Generator = {
             scoring = {},
             results = [],
             activationCode = '',
+            storageKeySeed = '',
             primaryColor = '#6366F1',
             bgColor = null
         } = data;
 
-        const storageKey = this.generateStorageKey(title);
+        const storageKey = this.generateStorageKey(storageKeySeed || activationCode || title);
 
         return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1127,7 +1128,7 @@ ${optionsHtml}
             return 0;
         }
 
-        function calculateScore() {
+        function calculateTotalScore() {
             let total = 0;
             answers.forEach((answer, index) => {
                 let score = getAnswerScore(answer);
@@ -1142,6 +1143,90 @@ ${optionsHtml}
             return total;
         }
 
+        function formatNumber(n) {
+            if (typeof n !== 'number' || !Number.isFinite(n)) return '0';
+            return Number.isInteger(n) ? String(n) : n.toFixed(2);
+        }
+
+        function calculateDimensionScores() {
+            const dims = (scoringConfig && Array.isArray(scoringConfig.dimensions)) ? scoringConfig.dimensions : [];
+            if (dims.length === 0) return [];
+
+            const list = [];
+            dims.forEach((dim, i) => {
+                const name = (dim && dim.name) ? String(dim.name) : ('维度' + (i + 1));
+                const questionsList = (dim && Array.isArray(dim.questions)) ? dim.questions : [];
+                const qNums = questionsList
+                    .map(n => parseInt(String(n).trim(), 10))
+                    .filter(n => Number.isFinite(n) && n >= 1 && n <= questions.length);
+
+                const questionCount = qNums.length;
+                const minScore = questionCount * OPTION_RANGE.min;
+                const maxScore = questionCount * OPTION_RANGE.max;
+
+                let score = 0;
+                let answeredCount = 0;
+                qNums.forEach(qNo => {
+                    const idx = qNo - 1;
+                    const answer = answers[idx];
+                    if (answer === null || answer === undefined) return;
+                    answeredCount++;
+
+                    let s = getAnswerScore(answer);
+                    if (scoringConfig.reverseQuestions && scoringConfig.reverseQuestions.includes(qNo)) {
+                        s = (OPTION_RANGE.max + OPTION_RANGE.min) - s;
+                    }
+                    score += s;
+                });
+
+                list.push({ name, score, minScore, maxScore, questionCount, answeredCount });
+            });
+
+            return list;
+        }
+
+        function tryEvaluateFormula(total, dimensionScores) {
+            const formula = (scoringConfig && typeof scoringConfig.formula === 'string') ? scoringConfig.formula.trim() : '';
+            if (!formula) return null;
+
+            const vars = { total };
+            (dimensionScores || []).forEach((d, i) => {
+                vars['d' + (i + 1)] = d.score;
+                const m = String(d.name || '').match(/\(([A-Za-z][A-Za-z0-9_]*)\)/);
+                if (m) vars[m[1]] = d.score;
+            });
+
+            try {
+                const keys = Object.keys(vars);
+                const values = keys.map(k => vars[k]);
+                const fn = new Function(...keys, 'return (' + formula + ');');
+                const v = fn(...values);
+                const n = (typeof v === 'number') ? v : parseFloat(String(v));
+                return Number.isFinite(n) ? n : null;
+            } catch (e) {
+                console.error('公式计算错误:', formula, e);
+                return null;
+            }
+        }
+
+        function calculateScore() {
+            const total = calculateTotalScore();
+            const method = (scoringConfig && scoringConfig.method) ? String(scoringConfig.method).trim() : 'sum';
+
+            if (method === 'avg') {
+                const answered = answers.filter(a => a !== null && a !== undefined).length;
+                return answered > 0 ? (total / answered) : 0;
+            }
+
+            if (method === 'formula') {
+                const dimensionScores = calculateDimensionScores();
+                const v = tryEvaluateFormula(total, dimensionScores);
+                if (v !== null) return v;
+            }
+
+            return total;
+        }
+
         function showResult() {
             showPage('loadingPage');
             setTimeout(() => {
@@ -1152,7 +1237,8 @@ ${optionsHtml}
         }
 
         function displayResults(score) {
-            document.getElementById('resultScore').textContent = score;
+            document.getElementById('resultScore').textContent = formatNumber(score);
+            const dimensionScores = calculateDimensionScores();
 
              let result = null;
              try {
@@ -1194,15 +1280,41 @@ ${optionsHtml}
             }
 
              const analysisEl = document.getElementById('analysisContent');
+             const dimensionHtml = (Array.isArray(dimensionScores) && dimensionScores.length > 0)
+                 ? dimensionScores.map(d => {
+                     const span = d.maxScore - d.minScore;
+                     let level = '';
+                     if (Number.isFinite(span) && span > 0) {
+                         const ratio = (d.score - d.minScore) / span;
+                         if (ratio <= 0.33) level = '相对较低';
+                         else if (ratio <= 0.66) level = '中等';
+                         else level = '相对较高';
+                     }
+                     const completeness = (d.answeredCount !== undefined && d.questionCount !== undefined && d.answeredCount !== d.questionCount)
+                         ? ('（已答' + d.answeredCount + '/' + d.questionCount + '）')
+                         : '';
+                     return '<div class="analysis-item"><div class="analysis-label">' +
+                         (d.name || '维度') +
+                         completeness +
+                         '</div><div class="analysis-text">得分 ' +
+                         formatNumber(d.score) +
+                         '（范围 ' +
+                         formatNumber(d.minScore) +
+                         '-' +
+                         formatNumber(d.maxScore) +
+                         (level ? ('；' + level) : '') +
+                         '）</div></div>';
+                 }).join('')
+                 : '';
              const analysis = result.analysis;
              if (Array.isArray(analysis) && analysis.length > 0) {
-                 analysisEl.innerHTML = analysis.map(item => {
+                 analysisEl.innerHTML = dimensionHtml + analysis.map(item => {
                      const label = (item && item.label) ? item.label : '解读';
                      const text = (item && item.text) ? item.text : '';
                      return '<div class="analysis-item"><div class="analysis-label">' + label + '</div><div class="analysis-text">' + text + '</div></div>';
                  }).join('');
              } else if (typeof analysis === 'string' && analysis.trim()) {
-                 analysisEl.innerHTML =
+                 analysisEl.innerHTML = dimensionHtml +
                      '<div class="analysis-item"><div class="analysis-label">详细解读</div><div class="analysis-text">' +
                      analysis +
                      '</div></div>';
@@ -1215,6 +1327,11 @@ ${optionsHtml}
                      '<div class="analysis-item"><div class="analysis-label">结果解读</div><div class="analysis-text">' +
                      (result.description || '感谢你完成本次测试。') +
                      '</div></div>';
+             }
+
+             // Ensure dimension breakdown is shown even in fallback branches
+             if (dimensionHtml && analysisEl && analysisEl.innerHTML && analysisEl.innerHTML.indexOf(dimensionHtml) !== 0) {
+                 analysisEl.innerHTML = dimensionHtml + analysisEl.innerHTML;
              }
          }
 

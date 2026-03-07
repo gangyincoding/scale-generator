@@ -10,6 +10,14 @@ const App = {
         parsedContent: null,
         quizData: null,
         generatedHtml: null,
+        activationRegistryLoaded: false,
+        activationRegistryMeta: {
+            schemaVersion: 1,
+            activationCodePolicy: 'fixed_numeric',
+            lastCode: {}
+        },
+        activationRepoRecords: [],
+        activationDraftRecords: [],
         activationRecords: [],
         theme: null
     },
@@ -38,14 +46,164 @@ const App = {
         // 从本地存储加载
         const saved = Utils.storage.get('activation_records');
         if (saved) {
-            this.state.activationRecords = saved;
+            this.state.activationDraftRecords = saved;
         }
+
+        const drafts = Array.isArray(this.state.activationDraftRecords) ? this.state.activationDraftRecords : [];
+        this.state.activationDraftRecords = drafts.map(r => this.normalizeActivationRecord(r));
+        this.state.activationRepoRecords = [];
+        this.state.activationRecords = this.sortActivationRecords(this.state.activationDraftRecords);
+        this.state.activationRegistryMeta = {
+            schemaVersion: 1,
+            activationCodePolicy: 'fixed_numeric',
+            lastCode: this.computeLastCode(this.state.activationRecords, {})
+        };
+        this.state.activationRegistryLoaded = false;
+
+        this.refreshActivationRegistryFromRepo().catch(e => {
+            console.warn('Failed to refresh activation registry from repo:', e);
+        });
     },
 
     // 保存激活码记录
     saveActivationRecord(record) {
+        this.state.activationDraftRecords.push(record);
         this.state.activationRecords.push(record);
-        Utils.storage.set('activation_records', this.state.activationRecords);
+        this.state.activationRecords = this.sortActivationRecords(this.state.activationRecords);
+        this.state.activationRegistryMeta.lastCode = this.computeLastCode(this.state.activationRecords, this.state.activationRegistryMeta.lastCode);
+        Utils.storage.set('activation_records', this.state.activationDraftRecords);
+    },
+
+    sortActivationRecords(records) {
+        return (records || []).slice().sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+    },
+
+    normalizeActivationRecord(raw) {
+        const r = raw && typeof raw === 'object' ? { ...raw } : {};
+        if (r.name === undefined && r.title !== undefined) r.name = r.title;
+        r.name = (r.name ?? '').toString();
+        r.abbr = (r.abbr ?? '').toString().trim() || (r.name ? Utils.extractAbbr(r.name) : '');
+        r.activationCode = (r.activationCode ?? '').toString().trim();
+        r.code = (r.code ?? '').toString().trim();
+        r.file = (r.file ?? '').toString().trim() || (r.name ? (Utils.sanitizeFilename(r.name) + '.html') : '');
+        r.createdAt = (r.createdAt ?? '').toString().trim() || Utils.formatDate(new Date());
+        return r;
+    },
+
+    computeLastCode(records, seed = {}) {
+        const lastCode = { ...(seed || {}) };
+        const list = Array.isArray(records) ? records : [];
+
+        for (const r of list) {
+            const code = (r && r.code !== undefined) ? String(r.code) : '';
+            const m = code.match(/^([A-Z]{2,})(\d+)$/);
+            if (!m) continue;
+            const abbr = m[1];
+            const n = parseInt(m[2], 10);
+            if (!Number.isFinite(n)) continue;
+            lastCode[abbr] = Math.max(lastCode[abbr] || 0, n);
+        }
+
+        return lastCode;
+    },
+
+    async refreshActivationRegistryFromRepo() {
+        let repoRegistry = null;
+        const resp = await fetch('config/activation-codes.json', { cache: 'no-store' });
+        if (!resp.ok) return;
+        repoRegistry = await resp.json();
+
+        const repoRecords = Array.isArray(repoRegistry?.records) ? repoRegistry.records : [];
+        const seedLastCode = (repoRegistry && typeof repoRegistry.lastCode === 'object' && repoRegistry.lastCode) ? repoRegistry.lastCode : {};
+
+        const merged = this.mergeActivationRegistry(repoRecords, this.state.activationDraftRecords, seedLastCode);
+        this.state.activationRepoRecords = merged.repoRecords;
+        this.state.activationDraftRecords = merged.draftRecords;
+        this.state.activationRecords = merged.allRecords;
+        this.state.activationRegistryMeta = {
+            schemaVersion: repoRegistry?.schemaVersion || 1,
+            activationCodePolicy: repoRegistry?.activationCodePolicy || 'fixed_numeric',
+            lastCode: merged.lastCode
+        };
+        this.state.activationRegistryLoaded = true;
+
+        Utils.storage.set('activation_records', this.state.activationDraftRecords);
+    },
+
+    mergeActivationRegistry(repoRecordsRaw, draftRecordsRaw, seedLastCode) {
+        const repoRecords = Array.isArray(repoRecordsRaw) ? repoRecordsRaw : [];
+        const draftRecords = Array.isArray(draftRecordsRaw) ? draftRecordsRaw : [];
+
+        const normalizedRepo = repoRecords.map(r => this.normalizeActivationRecord(r));
+        const usedIds = new Set(normalizedRepo.map(r => Number(r.id)).filter(n => Number.isFinite(n)));
+        let nextId = Math.max(0, ...Array.from(usedIds)) + 1;
+
+        let lastCode = this.computeLastCode(normalizedRepo, seedLastCode);
+
+        const seenActivationCodes = new Set(
+            normalizedRepo
+                .map(r => (r.activationCode ?? '').toString().trim())
+                .filter(Boolean)
+        );
+
+        const normalizedDrafts = [];
+        for (const raw of draftRecords) {
+            const r = this.normalizeActivationRecord(raw);
+
+            const desiredId = Number(r.id);
+            if (!Number.isFinite(desiredId) || usedIds.has(desiredId)) {
+                r.id = nextId++;
+            } else {
+                usedIds.add(desiredId);
+            }
+
+            if (!r.code && r.abbr) {
+                r.code = Utils.generateInternalCode(r.abbr, lastCode[r.abbr] || 0);
+                lastCode[r.abbr] = (lastCode[r.abbr] || 0) + 1;
+            }
+
+            const activationCode = (r.activationCode ?? '').toString().trim();
+            if (activationCode && seenActivationCodes.has(activationCode)) {
+                r._activationCodeConflict = true;
+            }
+            if (activationCode) seenActivationCodes.add(activationCode);
+
+            normalizedDrafts.push(r);
+        }
+
+        // De-dupe drafts that are already in repo (by activationCode).
+        const merged = normalizedRepo.slice();
+        const repoActivationCodes = new Set(
+            normalizedRepo
+                .map(r => (r.activationCode ?? '').toString().trim())
+                .filter(Boolean)
+        );
+
+        const filteredDrafts = normalizedDrafts.filter(d => {
+            const activationCode = (d.activationCode ?? '').toString().trim();
+            return !activationCode || !repoActivationCodes.has(activationCode);
+        });
+
+        for (const d of filteredDrafts) {
+            merged.push(d);
+        }
+
+        // Backfill abbr when only internal code exists.
+        merged.forEach(r => {
+            if (r.code && !r.abbr) {
+                const m = String(r.code).match(/^([A-Z]{2,})(\d+)$/);
+                if (m) r.abbr = m[1];
+            }
+        });
+
+        lastCode = this.computeLastCode(merged, lastCode);
+
+        return {
+            repoRecords: normalizedRepo,
+            draftRecords: filteredDrafts,
+            allRecords: this.sortActivationRecords(merged),
+            lastCode
+        };
     },
 
     // 绑定事件
@@ -179,6 +337,12 @@ const App = {
         document.getElementById('addResultBtn').addEventListener('click', () => {
             this.addResultItem();
         });
+        const autoRangesBtn = document.getElementById('autoResultRangesBtn');
+        if (autoRangesBtn) {
+            autoRangesBtn.addEventListener('click', () => {
+                this.autoGenerateResultRanges();
+            });
+        }
 
         // 复制按钮
         document.querySelectorAll('.copy-btn').forEach(btn => {
@@ -515,8 +679,104 @@ const App = {
         container.insertAdjacentHTML('beforeend', itemHtml);
     },
 
+    autoGenerateResultRanges() {
+        const items = Array.from(document.querySelectorAll('#resultsList .result-item'));
+        if (items.length === 0) {
+            Utils.showToast('暂无结果项可生成区间', 'error');
+            return;
+        }
+
+        const parsed = items.map((item, i) => {
+            const inputs = item.querySelectorAll('input');
+            const textarea = item.querySelector('textarea');
+            const min = parseInt(inputs?.[0]?.value);
+            const max = parseInt(inputs?.[1]?.value);
+            const type = (inputs?.[2]?.value || '').trim();
+            const desc = (textarea?.value || '').trim();
+            return { inputs, min, max, type, desc, i };
+        });
+
+        // Treat `0-0` as an unconfigured placeholder (common when parsing docs).
+        // Only block auto-generation when at least one range has a non-zero bound.
+        const hasNonPlaceholderRange = parsed.some(r =>
+            (Number.isFinite(r.min) && r.min !== 0) || (Number.isFinite(r.max) && r.max !== 0)
+        );
+        if (hasNonPlaceholderRange) {
+            Utils.showToast('已存在分数区间，未自动生成（如需重置请先清空区间）', 'info');
+            return;
+        }
+
+        const candidates = parsed.filter(r => r.type || r.desc);
+        if (candidates.length === 0) {
+            Utils.showToast('请先填写至少一条结果类型或描述', 'error');
+            return;
+        }
+
+        const questionCount = (this.state.quizData?.questions || []).length;
+        if (!questionCount) {
+            Utils.showToast('题目为空，无法计算分数区间', 'error');
+            return;
+        }
+
+        const optionType = document.getElementById('optionType')?.value || 'scale4';
+        let minPerQuestion = 1;
+        let maxPerQuestion = 4;
+        if (optionType === 'yesno') {
+            minPerQuestion = 0;
+            maxPerQuestion = 1;
+        } else {
+            const options = Parser.getDefaultOptions(optionType);
+            const numericValues = options
+                .map(o => parseInt(o.value, 10))
+                .filter(n => !isNaN(n));
+            maxPerQuestion = numericValues.length > 0 ? Math.max(...numericValues) : 4;
+            minPerQuestion = numericValues.length > 0 ? Math.min(...numericValues) : 1;
+        }
+
+        const minScore = questionCount * minPerQuestion;
+        const maxScore = questionCount * maxPerQuestion;
+        const k = candidates.length;
+        const span = Math.max(1, (maxScore - minScore + 1));
+        const base = Math.floor(span / k);
+        const rem = span % k;
+
+        let cursor = minScore;
+        candidates.forEach((r, idx) => {
+            const len = base + (idx < rem ? 1 : 0);
+            const start = cursor;
+            const end = Math.min(maxScore, cursor + len - 1);
+            cursor = end + 1;
+
+            if (r.inputs?.[0]) r.inputs[0].value = String(start);
+            if (r.inputs?.[1]) r.inputs[1].value = String(end);
+            if (r.inputs?.[2] && !r.type) r.inputs[2].value = `结果${idx + 1}`;
+        });
+
+        Utils.showToast('已生成分数区间，可按需微调', 'success');
+    },
+
     // 从表单收集数据
     collectFormData() {
+        const aiScoring = (this.state.quizData && this.state.quizData.scoring && typeof this.state.quizData.scoring === 'object')
+            ? this.state.quizData.scoring
+            : {};
+        const dimensions = (Array.isArray(aiScoring.dimensions) ? aiScoring.dimensions : [])
+            .map(d => {
+                const name = (d && d.name !== undefined) ? String(d.name).trim() : '';
+                const questions = (d && Array.isArray(d.questions)) ? d.questions : [];
+                const normalizedQuestions = questions
+                    .map(n => parseInt(String(n).trim(), 10))
+                    .filter(n => Number.isFinite(n) && n > 0);
+                const maxScore = (d && d.maxScore !== undefined) ? Number(d.maxScore) : NaN;
+                return {
+                    name,
+                    questions: normalizedQuestions,
+                    ...(Number.isFinite(maxScore) ? { maxScore } : {})
+                };
+            })
+            .filter(d => d.name && Array.isArray(d.questions) && d.questions.length > 0);
+        const formula = (typeof aiScoring.formula === 'string') ? aiScoring.formula.trim() : '';
+
         const data = {
             title: document.getElementById('quizTitle').value.trim(),
             subtitle: '',
@@ -530,12 +790,16 @@ const App = {
                 reverseQuestions: document.getElementById('reverseQuestions').value
                     .split(',')
                     .map(s => parseInt(s.trim()))
-                    .filter(n => !isNaN(n))
+                    .filter(n => !isNaN(n)),
+                dimensions,
+                formula
             },
             results: []
         };
 
         const aiResults = Array.isArray(this.state.quizData?.results) ? this.state.quizData.results : [];
+        const draftResults = [];
+        const manualRanges = [];
 
         // 收集结果设置
         document.querySelectorAll('#resultsList .result-item').forEach(item => {
@@ -548,7 +812,12 @@ const App = {
             const type = inputs[2].value.trim();
             const desc = textarea.value.trim();
 
+            if (type || desc) {
+                draftResults.push({ min, max, type, desc, idx });
+            }
+
             if (!isNaN(min) && !isNaN(max) && type) {
+                manualRanges.push({ min, max });
                 const aiAnalysis = Number.isFinite(idx) ? aiResults[idx]?.analysis : null;
                 const analysis = Array.isArray(aiAnalysis) && aiAnalysis.length > 0
                     ? aiAnalysis
@@ -567,9 +836,88 @@ const App = {
             }
         });
 
+        // If all configured ranges are `0-0`, treat them as placeholders and fall back to auto-splitting.
+        if (data.results.length > 0 && manualRanges.length === data.results.length) {
+            const allZeroRanges = manualRanges.every(r => r.min === 0 && r.max === 0);
+            if (allZeroRanges) {
+                const questionCount = (data.questions || []).length;
+                if (questionCount > 0) {
+                    const optionType = data.optionType || 'scale4';
+                    let maxPerQuestion = 4;
+                    if (optionType === 'yesno') {
+                        maxPerQuestion = 1;
+                    } else {
+                        const opts = Parser.getDefaultOptions(optionType);
+                        const numericValues = opts
+                            .map(o => parseInt(o.value, 10))
+                            .filter(n => !isNaN(n));
+                        maxPerQuestion = numericValues.length > 0 ? Math.max(...numericValues) : 4;
+                    }
+
+                    const maxScore = questionCount * maxPerQuestion;
+                    if (maxScore > 0) data.results = [];
+                }
+            }
+        }
+
         // 如果没有设置结果，使用默认结果
         if (data.results.length === 0) {
-            data.results = this.generateDefaultResults(data.questions.length, data.optionType);
+            if (draftResults.length > 0) {
+                const questionCount = (data.questions || []).length;
+                const optionType = data.optionType || 'scale4';
+
+                let minPerQuestion = 1;
+                let maxPerQuestion = 4;
+                if (optionType === 'yesno') {
+                    minPerQuestion = 0;
+                    maxPerQuestion = 1;
+                } else {
+                    const opts = Parser.getDefaultOptions(optionType);
+                    const numericValues = opts
+                        .map(o => parseInt(o.value, 10))
+                        .filter(n => !isNaN(n));
+                    maxPerQuestion = numericValues.length > 0 ? Math.max(...numericValues) : 4;
+                    minPerQuestion = numericValues.length > 0 ? Math.min(...numericValues) : 1;
+                }
+
+                const minScore = questionCount * minPerQuestion;
+                const maxScore = questionCount * maxPerQuestion;
+                const k = Math.max(1, draftResults.length);
+                const span = Math.max(1, (maxScore - minScore + 1));
+                const base = Math.floor(span / k);
+                const rem = span % k;
+
+                let cursor = minScore;
+                draftResults.forEach((r, i) => {
+                    const len = base + (i < rem ? 1 : 0);
+                    const start = cursor;
+                    const end = Math.min(maxScore, cursor + len - 1);
+                    cursor = end + 1;
+
+                    const t = (r.type || '').trim() || `结果${i + 1}`;
+                    const d = (r.desc || '').trim() || `你的得分在${start}-${end}分之间，属于${t}。`;
+                    const aiAnalysis = Number.isFinite(r.idx) ? aiResults[r.idx]?.analysis : null;
+                    const analysis = Array.isArray(aiAnalysis) && aiAnalysis.length > 0
+                        ? aiAnalysis
+                        : [
+                            { label: '得分说明', text: `你的得分为${start}-${end}分。` },
+                            { label: '核心解读', text: d },
+                            { label: '建议', text: '建议结合自身情况进行自我观察，如有需要可寻求专业帮助。' }
+                        ];
+
+                    data.results.push({
+                        condition: `total >= ${start} && total <= ${end}`,
+                        type: t,
+                        description: d,
+                        tags: [t],
+                        analysis
+                    });
+                });
+
+                data._resultsAutoGenerated = true;
+            } else {
+                data.results = this.generateDefaultResults(data.questions.length, data.optionType);
+            }
         }
 
         return data;
@@ -640,6 +988,9 @@ const App = {
             const data = this.collectFormData();
             data.primaryColor = theme.primaryColor;
             data.bgColor = theme.bgColor;
+            if (data._resultsAutoGenerated) {
+                Utils.showToast('已自动根据题目数划分分数区间（可在结果设置中手动调整）', 'info');
+            }
 
             // 验证必填字段
             if (!data.title) {
@@ -650,12 +1001,25 @@ const App = {
                 Utils.showToast('请输入激活码', 'error');
                 return;
             }
+            const activationCode = String(data.activationCode).trim();
+            const dup = this.state.activationRecords.find(r => String(r.activationCode || '').trim() === activationCode);
+            if (dup) {
+                Utils.showToast('激活码已存在，请更换新的码', 'error');
+                return;
+                Utils.showToast('婵€娲荤爜宸插瓨鍦紝璇锋洿鎹㈡柊鐨勭爜', 'error');
+                return;
+            }
             if (data.questions.length === 0) {
                 Utils.showToast('没有检测到题目，请检查文档', 'error');
                 return;
             }
 
             // 生成HTML
+            const abbr = Utils.extractAbbr(data.title);
+            const lastCodeMap = this.state.activationRegistryMeta?.lastCode || {};
+            const internalCode = Utils.generateInternalCode(abbr, lastCodeMap[abbr] || 0);
+            data.storageKeySeed = internalCode;
+
             this.state.generatedHtml = Generator.generate(data, {
                 includeActivation: document.getElementById('includeActivation').checked
             });
@@ -673,12 +1037,15 @@ const App = {
             if (themeEl) themeEl.textContent = theme.name;
 
             // 保存激活码记录
-            const abbr = Utils.extractAbbr(data.title);
+            lastCodeMap[abbr] = (lastCodeMap[abbr] || 0) + 1;
+
+            const nextId = Math.max(0, ...this.state.activationRecords.map(r => Number(r.id) || 0)) + 1;
             const record = {
-                id: this.state.activationRecords.length + 1,
+                id: nextId,
                 name: data.title,
                 abbr: abbr,
-                activationCode: data.activationCode,
+                code: internalCode,
+                activationCode: activationCode,
                 file: Utils.sanitizeFilename(data.title) + '.html',
                 createdAt: Utils.formatDate(new Date()),
                 themeId: theme.id
@@ -760,7 +1127,7 @@ const App = {
     // 显示历史记录
     showHistory() {
         const tbody = document.getElementById('historyTableBody');
-        const records = this.state.activationRecords;
+        const records = this.sortActivationRecords(this.state.activationRecords);
 
         if (records.length === 0) {
             tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #9CA3AF;">暂无记录</td></tr>';
@@ -769,7 +1136,7 @@ const App = {
                 <tr>
                     <td>${this.escapeHtml(r.name)}</td>
                     <td><code>${r.activationCode}</code></td>
-                    <td>${r.abbr || '-'}</td>
+                    <td>${r.code || '-'}</td>
                     <td>${r.file}</td>
                     <td>${r.createdAt}</td>
                 </tr>
@@ -781,11 +1148,22 @@ const App = {
 
     // 导出历史记录
     exportHistory() {
-        const records = this.state.activationRecords;
+        const meta = this.state.activationRegistryMeta || {};
+        const records = this.sortActivationRecords(this.state.activationRecords).map(r => ({
+            id: r.id,
+            abbr: r.abbr,
+            name: r.name,
+            code: r.code,
+            activationCode: r.activationCode,
+            file: r.file,
+            createdAt: r.createdAt
+        }));
+        const lastCode = this.computeLastCode(records, {});
         const content = JSON.stringify({
-            schemaVersion: 1,
-            activationCodePolicy: 'fixed_numeric',
-            records: records
+            schemaVersion: meta.schemaVersion || 1,
+            activationCodePolicy: meta.activationCodePolicy || 'fixed_numeric',
+            lastCode,
+            records
         }, null, 2);
 
         Utils.downloadFile(content, 'activation-codes.json', 'application/json');

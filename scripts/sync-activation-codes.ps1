@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 
 function Get-RepoRoot {
   $scriptDir = Split-Path -Parent $PSCommandPath
-  return (Resolve-Path (Join-Path $scriptDir '..\\..')).Path
+  return (Resolve-Path (Join-Path $scriptDir '..')).Path
 }
 
 function Read-JsonFile([string]$path) {
@@ -47,7 +47,7 @@ function Set-ActivationCodeInHtml([string]$htmlPath, [string]$newCode) {
 }
 
 $repoRoot = Get-RepoRoot
-$jsonPath = Join-Path $repoRoot '量表生成器\\config\\activation-codes.json'
+$jsonPath = Join-Path $repoRoot 'config\\activation-codes.json'
 $mdPath = Join-Path $repoRoot '激活码配置.md'
 
 $config = Read-JsonFile $jsonPath
@@ -64,17 +64,18 @@ foreach ($r in $config.records) {
 $rows = $rows | Sort-Object { $_.id }
 
 $tableLines = @(
-  '| 测试名称 | 文件名 | 激活码 |',
-  '|---------|--------|--------|'
+  '| 测试名称 | 内部编号 | 文件名 | 激活码 |',
+  '|---------|----------|--------|--------|'
 )
 foreach ($r in $rows) {
-  $tableLines += ('| ' + $r.name + ' | ' + $r.file + ' | `' + $r.activationCode + '` |')
+  $internal = if ($r.code) { $r.code } else { '-' }
+  $tableLines += ('| ' + $r.name + ' | ' + $internal + ' | ' + $r.file + ' | `' + $r.activationCode + '` |')
 }
 
 $md = @(
   '# 心理测试激活码配置',
   '',
-  '> 注意：`量表生成器/config/activation-codes.json` 是激活码与量表条目的唯一真源。本文件仅用于展示/对外发码清单；如需修改，请先更新 JSON，再同步更新本文件与对应问卷页面内的 `ACTIVATION_CODE`。',
+  '> 注意：`config/activation-codes.json` 是激活码与量表条目的唯一真源。本文件仅用于展示/对外发码清单；如需修改，请先更新 JSON，再同步更新本文件与对应问卷页面内的 `ACTIVATION_CODE`。',
   '',
   '## 激活码列表',
   '',
